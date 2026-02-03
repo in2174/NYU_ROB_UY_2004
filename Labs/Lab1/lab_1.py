@@ -12,9 +12,9 @@ JOINT_NAME_LEAD = "leg_front_r_3"
 
 ####
 ####
-KP = 0.05  # YOUR KP VALUE
-KI = 0.05 # YOUR KI VALUE
-KD = 0.00  # YOUR KD VALUE
+KP = 0.9  # YOUR KP VALUE
+KI = 0.35 # YOUR KI VALUE
+KD = 0.075  # YOUR KD VALUE
 ####
 ####
 LOOP_RATE = 200  # Hz
