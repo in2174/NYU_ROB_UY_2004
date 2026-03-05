@@ -1,3 +1,4 @@
+
 import numpy as np
 import scipy
 np.set_printoptions(precision=3, suppress=True)
@@ -62,7 +63,7 @@ class InverseKinematics():
             # TODO: Implement the trotting gait
             ################################################################################################
             touch_down_position, stand_position_1, stand_position_2, stand_position_3, liftoff_position, 
-            mid_swing_position 
+            mid_swing_position
         ]) + rf_ee_offset
         
         lf_ee_offset = np.array([0.06, 0.09, 0])
@@ -141,7 +142,7 @@ class InverseKinematics():
     def get_error_leg(self, theta, desired_position):
         ################################################################################################
         # TODO: [already done] paste lab 3 inverse kinematics here
-        x = self.fk_functions[0](theta)
+        x = self.leg_forward_kinematics(theta)
         error = desired_position - x
         
         ################################################################################################
@@ -151,7 +152,7 @@ class InverseKinematics():
         self.leg_forward_kinematics = self.fk_functions[leg_index]
         ################################################################################################
         # TODO: implement interpolation for all 4 legs here
-        res = scipy.optimize.minimize(self.get_error_leg, initial_guess, args = (target_ee))
+        res = scipy.optimize.minimize(self.get_error_leg, initial_guess, args = (target_ee,))
 
         ################################################################################################
         return res.x
@@ -160,18 +161,17 @@ class InverseKinematics():
         ################################################################################################
         # TODO: implement interpolation for all 4 legs here
         ################################################################################################
-        if 0 < t < 1/6:
-            return [-0.05 * t, 0, -.05 - 0.014 * t]
-        elif 1/6 < t < 2/6: 
-            return [-.5 + 0.0025 * t,0,-.14]
-        elif 2/6 < t < 3/6:
-            return [-.025 + 0.0025 * t, 0, -.14]
-        elif 3/6 < t < 4/6: 
-            return [0 + 0.0025 * t, 0, -.14]
-        elif 4/6 < t < 5/6: 
-            return [0.025 + 0.0025 * t, 0, -.14]
-        elif 5/6 < t < 1: 
-            return [0.05 - .05 *t, 0, -.14 + .014 *t]
+        pts = self.ee_triangle_positions[leg_index] 
+        n = pts.shape[0]  # 6 (b/c we have 6 waypoints)                             
+
+        t = t % 1.0    # makes sure t is in [0,1)
+        s = t * n      # scale t to [0,6) because we have 6 segments
+        i = int(s)     # which segment we're in (0 to 5)
+        u = s - i      # how into that segment we are
+
+        p0 = pts[i]             # start of current segment 
+        p1 = pts[(i + 1) % n]   # end of current segment, wraps back to 0
+        return (1 - u) * p0 + u * p1  # linear interpolation between p0 and p1 (weighted average)
         
 
     def cache_target_joint_positions(self):
@@ -249,6 +249,11 @@ def main():
         for position in inverse_kinematics.target_ee_cache:
             x_list.append(position[0])
             z_list.append(position[2])
+
+        x_list.append(x_list[0])
+        z_list.append(z_list[0])
+        plt.figure()
+
         plt.xlabel('X(m)')
         plt.ylabel('Z(m)')
         plt.title('EE front right foot trot gait')
