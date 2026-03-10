@@ -49,12 +49,12 @@ class InverseKinematics():
         # TODO: Implement the trotting gait
         ################################################################################################
         # forward waypoints
-        touch_down_position = np.array([-0.05,0,-0.14]) # change -0.05 to -0.07 for faster 
+        touch_down_position = np.array([-0.07,0,-0.14]) # change -0.05 to -0.07 for faster 
         stand_position_1 = np.array([-0.025,0,-0.14])
         stand_position_2 = np.array([0,0,-0.14])
         stand_position_3 = np.array([0.025,0,-0.14])
-        liftoff_position = np.array([0.05,0,-0.14]) # change 0.05 to 0.07 for faster 
-        mid_swing_position = np.array([0,0,-0.05])  # change -0.05 to -0.03 for faster 
+        liftoff_position = np.array([0.07,0,-0.14]) # change 0.05 to 0.07 for faster 
+        mid_swing_position = np.array([0,0,-0.03])  # change -0.05 to -0.03 for faster 
         
         ## trotting
         # TODO: Implement each leg’s trajectory in the trotting gait.
@@ -63,8 +63,8 @@ class InverseKinematics():
             ################################################################################################
             # TODO: Implement the trotting gait
             ################################################################################################
-            touch_down_position, stand_position_1, stand_position_2, stand_position_3, liftoff_position, 
-            mid_swing_position
+            touch_down_position, mid_swing_position, liftoff_position, stand_position_3, stand_position_2,
+            stand_position_1
         ]) + rf_ee_offset
         
         lf_ee_offset = np.array([0.06, 0.09, 0])
@@ -81,8 +81,8 @@ class InverseKinematics():
             ################################################################################################
             # TODO: Implement the trotting gait
             ################################################################################################
-            touch_down_position, stand_position_1, stand_position_2, stand_position_3, liftoff_position, 
-            mid_swing_position
+            touch_down_position, mid_swing_position, liftoff_position, stand_position_3, stand_position_2,
+            stand_position_1
         ]) + rb_ee_offset
         
         lb_ee_offset = np.array([-0.11, 0.09, 0])
@@ -302,7 +302,7 @@ def main():
         plt.ylabel('X (m)')
         plt.legend(['Target EE Position','Result EE Position'])
         plt.title('End Effector X position')
-        plt.plot()
+        plt.savefig('plot2faster')
 
     # Plot the cached trot gait path for one foot.
     if len(inverse_kinematics.target_ee_cache):
@@ -320,7 +320,7 @@ def main():
         plt.ylabel('Z(m)')
         plt.title('EE front right foot trot gait')
         plt.plot(x_list, z_list)
-        plt.show()
+        plt.savefig('plot3faster')
 
 
 
