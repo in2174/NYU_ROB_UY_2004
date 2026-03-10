@@ -48,6 +48,7 @@ class InverseKinematics():
         ################################################################################################
         # TODO: Implement the trotting gait
         ################################################################################################
+        # forward waypoints
         touch_down_position = np.array([-0.05,0,-0.14]) # change -0.05 to -0.07 for faster 
         stand_position_1 = np.array([-0.025,0,-0.14])
         stand_position_2 = np.array([0,0,-0.14])
@@ -94,15 +95,52 @@ class InverseKinematics():
 
         ]) + lb_ee_offset
 
-
-        self.ee_triangle_positions = [rf_ee_triangle_positions, lf_ee_triangle_positions, rb_ee_triangle_positions, lb_ee_triangle_positions]
         self.fk_functions = [self.fr_leg_fk, self.fl_leg_fk, self.br_leg_fk, self.bl_leg_fk]
+        
+        self.ee_triangle_positions = [rf_ee_triangle_positions, lf_ee_triangle_positions, rb_ee_triangle_positions, lb_ee_triangle_positions]
+        # self.target_joint_positions_cache, self.target_ee_cache = self.cache_target_joint_positions()
+        
+        # rotate right waypoints 
+        # Right legs move +x, left legs move -x → robot spins in place
+        # td_rot = np.array([-0.05, 0, -0.14])
+        # s1_rot = np.array([-0.025, 0, -0.14])
+        # s2_rot = np.array([0, 0, -0.14])
+        # s3_rot = np.array([0.025, 0, -0.14])
+        # lo_rot = np.array([0.05, 0, -0.14])
+        # sw_rot = np.array([0, 0, -0.03])
+        
+        # flip x for left legs
+        # flip = np.array([-1, 1, 1])  
+        
+        # rf_rot_positions = np.array([td_rot,        s1_rot,        s2_rot,        s3_rot,        lo_rot,        sw_rot       ]) + rf_ee_offset
+        # lf_rot_positions = np.array([td_rot * flip, sw_rot,        lo_rot * flip, s3_rot * flip, s2_rot * flip, s1_rot * flip]) + lf_ee_offset
+        # rb_rot_positions = np.array([td_rot,        s1_rot,        s2_rot,        s3_rot,        lo_rot,        sw_rot       ]) + rb_ee_offset
+        # lb_rot_positions = np.array([td_rot * flip, sw_rot,        lo_rot * flip, s3_rot * flip, s2_rot * flip, s1_rot * flip]) + lb_ee_offset
+
+
+        # Cache rotation gait by swapping ee_triangle_positions
+        # self.ee_triangle_positions = [rf_rot_positions, lf_rot_positions, rb_rot_positions, lb_rot_positions]
+        # self.rot_joint_positions_cache, self.rot_ee_cache = self.cache_target_joint_positions()
+        # print(f'shape of target_joint_positions_cache: {self.target_joint_positions_cache.shape}')
+        # print(f'shape of target_ee_cache: {self.target_ee_cache.shape}')
+
 
         ##### TODO: Uncomment when you want to generate the cache #######
         self.target_joint_positions_cache, self.target_ee_cache = self.cache_target_joint_positions()
+        
         print(f'shape of target_joint_positions_cache: {self.target_joint_positions_cache.shape}')
         print(f'shape of target_ee_cache: {self.target_ee_cache.shape}')
 
+        # Square path stuff
+        # self.STEPS_FORWARD = 150  # tune for one side of square
+        # self.STEPS_TURN    = 100  # tune for 90 degree turn
+        # self.gait_phase = 'forward'
+        # self.phase_step = 0
+
+        # self.pd_timer_period = 1.0 / 200
+        # self.ik_timer_period = 1.0 / 100
+        # self.pd_timer = self.create_timer(self.pd_timer_period, self.pd_timer_callback)
+        # self.ik_timer = self.create_timer(self.ik_timer_period, self.ik_timer_callback)
 
     def fr_leg_fk(self, theta):
         T_RF_0_1 = translation(0.07500, -0.08350, 0) @ rotation_x(1.57080) @ rotation_z(theta[0])
@@ -202,6 +240,30 @@ class InverseKinematics():
             self.counter = 0
         return target_ee, target_joint_positions
 
+    # for square path
+    # def get_target_joint_positions(self):
+    #     # Pick cache based on current gait phase
+    #     if self.gait_phase == 'forward':
+    #         joint_pos = self.target_joint_positions_cache[self.counter]
+    #         ee        = self.target_ee_cache[self.counter]
+    #     else:
+    #         joint_pos = self.rot_joint_positions_cache[self.counter]
+    #         ee        = self.rot_ee_cache[self.counter]
+
+    #     self.counter += 1
+    #     if self.counter >= self.target_joint_positions_cache.shape[0]:
+    #         self.counter = 0
+
+    #     # Switch gait for square path
+    #     self.phase_step += 1
+    #     if self.gait_phase == 'forward' and self.phase_step >= self.STEPS_FORWARD:
+    #         self.gait_phase = 'turn'
+    #         self.phase_step = 0
+    #     elif self.gait_phase == 'turn' and self.phase_step >= self.STEPS_TURN:
+    #         self.gait_phase = 'forward'
+    #         self.phase_step = 0
+
+    #     return ee, joint_pos
 
 
 
