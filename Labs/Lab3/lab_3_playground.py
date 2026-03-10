@@ -48,12 +48,12 @@ class InverseKinematics():
         ################################################################################################
         # TODO: Implement the trotting gait
         ################################################################################################
-        touch_down_position = np.array([-0.05,0,-0.14])
+        touch_down_position = np.array([-0.05,0,-0.14]) # change -0.05 to -0.07 for faster 
         stand_position_1 = np.array([-0.025,0,-0.14])
         stand_position_2 = np.array([0,0,-0.14])
         stand_position_3 = np.array([0.025,0,-0.14])
-        liftoff_position = np.array([0.05,0,-0.14])
-        mid_swing_position = np.array([0,0,-0.05])
+        liftoff_position = np.array([0.05,0,-0.14]) # change 0.05 to 0.07 for faster 
+        mid_swing_position = np.array([0,0,-0.05])  # change -0.05 to -0.03 for faster 
         
         ## trotting
         # TODO: Implement each leg’s trajectory in the trotting gait.
