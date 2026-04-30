@@ -1,19 +1,3 @@
-"""
-gesture_controller.py  ─  Stanford Pupper gesture-driven locomotion
-
-Gestures → commands (from gesture_recognition.py on /gesture_command):
-  "Open_Palm"          → "stop"   → STANDING
-  "Closed_Fist"        → "walk"   → WALKING    (slow + stable)
-  "Pointing_Up"        → "stand"  → STANDING
-  "Thumb_Down"         → "sit"    → SITTING    (slow, safe descent)
-  "Victory"            → "spin"   → SPINNING   (spin-in-place)
-
-Changes in this version:
-  - Sit trajectory is interpolated over more steps (slow + safe)
-  - Walking uses longer step period and lower step height (less camera shake)
-  - Spin-in-place: diagonal pairs counter-rotate around body center
-"""
-
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -26,34 +10,7 @@ np.set_printoptions(precision=3, suppress=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Robot constants
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Pupper leg geometry (metres)
-L1 = 0.0      # hip offset (abduction link)
-L2 = 0.1      # upper leg
-L3 = 0.1      # lower leg
-
-# Body offsets for each leg in body frame  (x forward, y left, z up)
-LEG_OFFSETS = {
-    'RF': np.array([ 0.07, -0.035, 0.0]),
-    'LF': np.array([ 0.07,  0.035, 0.0]),
-    'RB': np.array([-0.07, -0.035, 0.0]),
-    'LB': np.array([-0.07,  0.035, 0.0]),
-}
-LEG_ORDER = ['RF', 'LF', 'RB', 'LB']
-
-# Joint name order expected by the controller topic
-JOINT_NAMES = [
-    'leg_front_r_1', 'leg_front_r_2', 'leg_front_r_3',
-    'leg_front_l_1', 'leg_front_l_2', 'leg_front_l_3',
-    'leg_back_r_1',  'leg_back_r_2',  'leg_back_r_3',
-    'leg_back_l_1',  'leg_back_l_2',  'leg_back_l_3',
-]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  HTM helpers  (identical to Lab 3)
+#  HTM helpers 
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def rotation_x(a):
@@ -73,227 +30,116 @@ def translation(x, y, z):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Forward kinematics for one leg
+#  Gait waypoint builder
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def forward_kinematics_leg(theta, leg):
-    """Return end-effector position in body frame for one leg."""
-    t1, t2, t3 = theta
-    off = LEG_OFFSETS[leg]
+def build_trot_waypoints():
+    """Return (ee_triangle_positions list, offsets list) — same as Lab 3."""
+    touch_down   = np.array([-0.05,  0,    -0.14])
+    stand_1      = np.array([-0.025, 0,    -0.14])
+    stand_2      = np.array([ 0,     0,    -0.14])
+    stand_3      = np.array([ 0.025, 0,    -0.14])
+    liftoff      = np.array([ 0.05,  0,    -0.14])
+    mid_swing    = np.array([ 0,     0,    -0.05])
 
-    T = (translation(*off)
-         @ rotation_z(t1)
-         @ translation(0, 0, -L2)
-         @ rotation_y(t2)
-         @ translation(L3, 0, 0)
-         @ rotation_y(t3))
-    return T[:3, 3]
+    rf_off = np.array([ 0.06, -0.09, 0])
+    lf_off = np.array([ 0.06,  0.09, 0])
+    rb_off = np.array([-0.11, -0.09, 0])
+    lb_off = np.array([-0.11,  0.09, 0])
 
+    swing_phase = np.array([touch_down, mid_swing, liftoff,
+                             stand_3,   stand_2,   stand_1])
+    stand_phase = np.array([stand_3, stand_2, stand_1,
+                             touch_down, mid_swing, liftoff])
 
-def ik_error(theta, p_des, leg):
-    p = forward_kinematics_leg(theta, leg)
-    return np.sum((p - p_des) ** 2)
-
-
-def inverse_kinematics(p_des, leg, theta0=None):
-    if theta0 is None:
-        theta0 = np.zeros(3)
-    res = scipy.optimize.minimize(ik_error, theta0, args=(p_des, leg),
-                                  method='L-BFGS-B',
-                                  bounds=[(-np.pi, np.pi)] * 3,
-                                  options={'ftol': 1e-8, 'maxiter': 200})
-    return res.x
+    return [
+        swing_phase + rf_off,
+        stand_phase + lf_off,
+        stand_phase + rb_off,
+        swing_phase + lb_off,
+    ]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Gait caches
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _build_ee_trajectory(waypoints):
-    """Linear-interpolate between waypoints; returns list of ee positions."""
-    pts = []
-    for i in range(len(waypoints)):
-        p0 = waypoints[i]
-        p1 = waypoints[(i + 1) % len(waypoints)]
-        for u in np.linspace(0, 1, 5, endpoint=False):
-            pts.append((1 - u) * p0 + u * p1)
-    return pts
-
-
-def _solve_cache(ee_seqs):
+def build_sit_waypoints():
     """
-    ee_seqs: list of 4 ee-trajectory lists (one per leg, same length).
-    Returns numpy array of shape (N, 12).
+    Dog-sit transition: front legs extend forward while back legs tuck under.
+    Front legs reach x=0.10 (further forward) and hold z=-0.14 (fully extended).
+    Back legs rise from z=-0.14 to z=-0.06 and shift forward under the hip.
     """
-    N = len(ee_seqs[0])
-    cache = np.zeros((N, 12))
-    prev = [np.zeros(3)] * 4
-    for i in range(N):
-        for j, leg in enumerate(LEG_ORDER):
-            sol = inverse_kinematics(ee_seqs[j][i], leg, theta0=prev[j])
-            prev[j] = sol
-            cache[i, j*3:(j+1)*3] = sol
-    return cache
+    rf_off = np.array([ 0.06, -0.09, 0])
+    lf_off = np.array([ 0.06,  0.09, 0])
+    rb_off = np.array([-0.11, -0.09, 0])
+    lb_off = np.array([-0.11,  0.09, 0])
+
+    # Front legs: extend forward (x: 0 → 0.04) and stay fully extended (z=-0.14)
+    front_sit = np.array([
+        [ 0.00, 0, -0.14],
+        [ 0.01, 0, -0.14],
+        [ 0.02, 0, -0.14],
+        [ 0.03, 0, -0.14],
+        [ 0.04, 0, -0.14],
+        [ 0.04, 0, -0.14],
+    ])
+
+    # Back legs: tuck upward and shift foot forward under the hip
+    back_sit = np.array([
+        [ 0.00, 0, -0.14],
+        [ 0.01, 0, -0.12],
+        [ 0.02, 0, -0.10],
+        [ 0.03, 0, -0.08],
+        [ 0.04, 0, -0.06],
+        [ 0.04, 0, -0.06],
+    ])
+
+    return [front_sit + rf_off, front_sit + lf_off,
+            back_sit  + rb_off, back_sit  + lb_off]
 
 
-# ─── Stand pose ──────────────────────────────────────────────────────────────
-
-STAND_Z   = -0.12   # body height in standing (metres, negative = down)
-STAND_EE  = {leg: LEG_OFFSETS[leg] + np.array([0, 0, STAND_Z])
-             for leg in LEG_ORDER}
-
-
-def build_stand_angles():
-    angles = np.zeros(12)
-    for j, leg in enumerate(LEG_ORDER):
-        angles[j*3:(j+1)*3] = inverse_kinematics(STAND_EE[leg], leg)
-    return angles
-
-
-# ─── Sit pose ────────────────────────────────────────────────────────────────
-
-SIT_EE = {
-    'RF': LEG_OFFSETS['RF'] + np.array([ 0.04,  0.0, -0.07]),
-    'LF': LEG_OFFSETS['LF'] + np.array([ 0.04,  0.0, -0.07]),
-    'RB': LEG_OFFSETS['RB'] + np.array([-0.02,  0.0, -0.10]),
-    'LB': LEG_OFFSETS['LB'] + np.array([-0.02,  0.0, -0.10]),
-}
-
-
-def build_sit_cache(stand_angles):
+def build_spin_waypoints():
     """
-    Slow, linear trajectory from standing pose to sit pose.
-    Uses many interpolation steps so the robot lowers gradually and safely.
-    N_STEPS controls how slowly it sits — larger = slower/safer.
+    Approximate 360° spin by shifting feet laterally in opposite directions
+    for diagonal pairs — creates body yaw.
     """
-    N_STEPS = 60   # at 10 Hz control = ~6 seconds to fully sit  ← SLOW & SAFE
-    cache = np.zeros((N_STEPS, 12))
+    rf_off = np.array([ 0.06, -0.09, 0])
+    lf_off = np.array([ 0.06,  0.09, 0])
+    rb_off = np.array([-0.11, -0.09, 0])
+    lb_off = np.array([-0.11,  0.09, 0])
 
-    # Compute sit joint angles
-    sit_angles = np.zeros(12)
-    for j, leg in enumerate(LEG_ORDER):
-        sit_angles[j*3:(j+1)*3] = inverse_kinematics(SIT_EE[leg], leg)
+    swing_spin = np.array([
+        [ 0,    0.03, -0.14],
+        [ 0,    0.03, -0.05],
+        [ 0,    0.03, -0.14],
+        [ 0,   -0.03, -0.14],
+        [ 0,   -0.03, -0.14],
+        [ 0,   -0.03, -0.14],
+    ])
+    stand_spin = np.array([
+        [ 0,   -0.03, -0.14],
+        [ 0,   -0.03, -0.14],
+        [ 0,   -0.03, -0.14],
+        [ 0,    0.03, -0.14],
+        [ 0,    0.03, -0.05],
+        [ 0,    0.03, -0.14],
+    ])
 
-    for i in range(N_STEPS):
-        u = i / (N_STEPS - 1)                    # 0 → 1
-        # Ease-in-out: slow at start, slow at end — gentle on servos
-        u_smooth = 0.5 - 0.5 * np.cos(np.pi * u)
-        cache[i] = (1 - u_smooth) * stand_angles + u_smooth * sit_angles
-
-    return cache, sit_angles
-
-
-# ─── Trot gait ───────────────────────────────────────────────────────────────
-# Slowed down significantly: longer stance, lower step height, more interp pts
-# so the body moves smoothly and the camera doesn't shake.
-
-STEP_HEIGHT  = 0.022   # was ~0.04 — lower swing = less body rock
-STEP_REACH   = 0.025   # fore-aft reach per step
-GAIT_Z       = STAND_Z  # stay at stand height during gait
-
-
-def _trot_ee_seqs(direction=1.0):
-    """
-    Build 4 ee trajectories for a trot gait.
-    direction=+1 → forward,  direction=-1 → backward
-    Each swing arc: 8 waypoints; each stance: 8 waypoints → 16 pts × 5 interp = 80 per cycle
-    Diagonal pairs (RF+LB) and (LF+RB) are 180° out of phase.
-    """
-    reach = STEP_REACH * direction
-
-    def swing(base):
-        # Lift up and forward
-        return [
-            base + np.array([ reach, 0, 0]),          # liftoff
-            base + np.array([ reach*0.5, 0,  STEP_HEIGHT * 0.5]),
-            base + np.array([ 0,          0,  STEP_HEIGHT]),  # peak
-            base + np.array([-reach*0.5, 0,  STEP_HEIGHT * 0.5]),
-            base + np.array([-reach,     0,  0]),      # touch-down
-        ]
-
-    def stance(base):
-        # Slide backward to push body forward
-        return [
-            base + np.array([-reach,      0, 0]),
-            base + np.array([-reach*0.5,  0, 0]),
-            base + np.array([  0,          0, 0]),
-            base + np.array([ reach*0.5,   0, 0]),
-            base + np.array([ reach,        0, 0]),
-        ]
-
-    seqs = []
-    for j, leg in enumerate(LEG_ORDER):
-        base = STAND_EE[leg]
-        # RF(0) and LB(3) swing together; LF(1) and RB(2) swing together
-        if leg in ('RF', 'LB'):
-            ee = swing(base) + stance(base)
-        else:
-            ee = stance(base) + swing(base)
-        seqs.append(ee)
-    return seqs
+    return [swing_spin + rf_off, stand_spin + lf_off,
+            stand_spin + rb_off, swing_spin + lb_off]
 
 
-def build_trot_cache(direction=1.0):
-    seqs = _trot_ee_seqs(direction)
-    traj = [_build_ee_trajectory(s) for s in seqs]
-    return _solve_cache(traj)
+# Static hold poses
+STAND_EE_TARGETS = [
+    np.array([ 0.06, -0.09, -0.14]),   # RF
+    np.array([ 0.06,  0.09, -0.14]),   # LF
+    np.array([-0.11, -0.09, -0.14]),   # RB
+    np.array([-0.11,  0.09, -0.14]),   # LB
+]
 
-
-# ─── Spin-in-place gait ──────────────────────────────────────────────────────
-# Body stays centred.  Front feet step rightward, rear feet step leftward
-# (or vice-versa) — net effect is yaw rotation about the body's vertical axis.
-#
-# Implementation: same trot-style alternating diagonal pairs, but the
-# "forward" direction of each leg is set to the tangential direction around
-# the body's centre, not body-x.  We approximate this as:
-#   RF → step left  (+y)     LF → step right (-y)     (during swing)
-#   RB → step right (-y)     LB → step left  (+y)
-# This counter-rotates the two sides and produces CW yaw.
-# Flip the signs to get CCW.
-
-SPIN_REACH = 0.020   # lateral reach per step
-
-
-def build_spin_cache():
-    """Spin clockwise (from above). Diagonal pairs alternate swing/stance."""
-
-    def swing_lat(base, dy):
-        return [
-            base + np.array([0,  dy,        0]),
-            base + np.array([0,  dy * 0.5,  STEP_HEIGHT * 0.5]),
-            base + np.array([0,  0,          STEP_HEIGHT]),
-            base + np.array([0, -dy * 0.5,  STEP_HEIGHT * 0.5]),
-            base + np.array([0, -dy,         0]),
-        ]
-
-    def stance_lat(base, dy):
-        # During stance, slide opposite direction (ground reaction)
-        return [
-            base + np.array([0, -dy,         0]),
-            base + np.array([0, -dy * 0.5,   0]),
-            base + np.array([0,  0,           0]),
-            base + np.array([0,  dy * 0.5,    0]),
-            base + np.array([0,  dy,          0]),
-        ]
-
-    # CW yaw:  RF steps left (+y), LF steps right (-y),
-    #          RB steps right (-y), LB steps left (+y)
-    spin_dirs = {'RF': +SPIN_REACH, 'LF': -SPIN_REACH,
-                 'RB': -SPIN_REACH, 'LB': +SPIN_REACH}
-
-    seqs = []
-    for leg in LEG_ORDER:
-        base = STAND_EE[leg]
-        dy   = spin_dirs[leg]
-        # RF+LB swing together (as in trot)
-        if leg in ('RF', 'LB'):
-            ee = swing_lat(base, dy) + stance_lat(base, dy)
-        else:
-            ee = stance_lat(base, dy) + swing_lat(base, dy)
-        seqs.append(ee)
-
-    traj = [_build_ee_trajectory(s) for s in seqs]
-    return _solve_cache(traj)
+SIT_EE_TARGETS = [
+    np.array([ 0.10, -0.09, -0.14]),   # RF: extended forward
+    np.array([ 0.10,  0.09, -0.14]),   # LF: extended forward
+    np.array([-0.07, -0.09, -0.06]),   # RB: tucked up and shifted forward
+    np.array([-0.07,  0.09, -0.06]),   # LB: tucked up and shifted forward
+]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -302,64 +148,145 @@ def build_spin_cache():
 
 class RobotState(Enum):
     STANDING = auto()
-    SITTING  = auto()
     WALKING  = auto()
+    SITTING  = auto()
     SPINNING = auto()
+    TRANSITIONING = auto()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ROS2 Node
+#  Main node
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class GestureControllerNode(Node):
 
-    # ── Control-loop frequencies ──────────────────────────────────────────────
-    # Lower = smoother / less shake.  PD at 10 Hz, IK already runs offline.
-    PD_HZ = 10   # was 20 — half the rate = half the micro-jitter
-
     def __init__(self):
-        super().__init__('gesture_controller')
-        self.get_logger().info("Gesture Controller starting — building gait caches…")
+        super().__init__("gesture_controller")
 
-        # Pubs / subs
+        self.joint_sub = self.create_subscription(
+            JointState, "joint_states", self._joint_callback, 10)
+
+        self.gesture_sub = self.create_subscription(
+            String, "/gesture_command", self._gesture_callback, 10)
+
         self.cmd_pub = self.create_publisher(
-            Float64MultiArray, '/forward_command_controller/commands', 10)
-        self.create_subscription(
-            String, '/gesture_command', self._gesture_callback, 10)
-        self.create_subscription(
-            JointState, '/joint_states', self._joint_callback, 10)
+            Float64MultiArray, "/forward_command_controller/commands", 10)
 
-        # State
-        self.state              = RobotState.STANDING
-        self.counter            = 0
-        self.joint_positions    = None
-        self.joint_velocities   = None
-        self._walk_timer        = None
+        self.joint_positions  = None
+        self.joint_velocities = None
+        self.state = RobotState.STANDING
 
-        # Pre-build all caches (slow once at startup, fast during execution)
-        self.get_logger().info("  Building stand pose…")
-        self.stand_angles = build_stand_angles()
+        self.get_logger().info("Building gait caches (this may take ~10 s) …")
 
-        self.get_logger().info("  Building sit cache…")
-        self.sit_cache, self.sit_angles = build_sit_cache(self.stand_angles)
+        self.trot_cache  = self._build_cache(build_trot_waypoints())
+        self.spin_cache  = self._build_cache(build_spin_waypoints())
+        self.sit_cache   = self._build_cache(build_sit_waypoints(), n_steps=30)
 
-        self.get_logger().info("  Building trot cache (forward)…")
-        self.trot_fwd_cache = build_trot_cache(direction=+1.0)
+        self.stand_angles = self._compute_static_pose(STAND_EE_TARGETS)
+        self.sit_angles   = self._compute_static_pose(SIT_EE_TARGETS)
 
-        self.get_logger().info("  Building spin cache…")
-        self.spin_cache = build_spin_cache()
+        self.get_logger().info("Gait caches built.")
 
+        self.counter = 0
+        self.active_cache = self.trot_cache
         self.target_joint_positions = self.stand_angles.copy()
-        self.get_logger().info("All caches ready.  Waiting for gestures…")
+        self._active_gait_name = "standing"
 
-        # Timers
-        self.create_timer(1.0 / self.PD_HZ, self._ik_callback)
-        self.create_timer(1.0 / self.PD_HZ, self._pd_callback)
+        self.pd_timer = self.create_timer(1.0 / 200.0, self._pd_callback)
+        self.ik_timer = self.create_timer(1.0 / 100.0, self._ik_callback)
 
-    # ── Gesture callback ──────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    #  FK
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _fr_fk(self, t):
+        T = (translation(0.07500, -0.08350, 0) @ rotation_x(1.57080) @ rotation_z(t[0])
+             @ rotation_y(-1.57080) @ rotation_z(t[1])
+             @ translation(0, -0.04940, 0.06850) @ rotation_y(1.57080) @ rotation_z(t[2])
+             @ translation(0.06231, -0.06216, 0.01800))
+        return T[:3, 3]
+
+    def _fl_fk(self, t):
+        T = (translation(0.07500, 0.08350, 0) @ rotation_x(1.57080) @ rotation_z(-t[0])
+             @ rotation_y(-1.57080) @ rotation_z(t[1])
+             @ translation(0, -0.04940, 0.06850) @ rotation_y(1.57080) @ rotation_z(-t[2])
+             @ translation(0.06231, -0.06216, -0.01800))
+        return T[:3, 3]
+
+    def _br_fk(self, t):
+        T = (translation(-0.07500, -0.07250, 0) @ rotation_x(1.57080) @ rotation_z(t[0])
+             @ rotation_y(-1.57080) @ rotation_z(t[1])
+             @ translation(0, -0.04940, 0.06850) @ rotation_y(1.57080) @ rotation_z(t[2])
+             @ translation(0.06231, -0.06216, 0.01800))
+        return T[:3, 3]
+
+    def _bl_fk(self, t):
+        T = (translation(-0.07500, 0.07250, 0) @ rotation_x(1.57080) @ rotation_z(-t[0])
+             @ rotation_y(-1.57080) @ rotation_z(t[1])
+             @ translation(0, -0.04940, 0.06850) @ rotation_y(1.57080) @ rotation_z(-t[2])
+             @ translation(0.06231, -0.06216, -0.01800))
+        return T[:3, 3]
+
+    @property
+    def _fk_fns(self):
+        return [self._fr_fk, self._fl_fk, self._br_fk, self._bl_fk]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  IK helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _ik_single_leg(self, target_ee, leg_index, guess=None):
+        if guess is None:
+            guess = [0.0, 0.0, 0.0]
+        fk = self._fk_fns[leg_index]
+        def cost(theta):
+            err = fk(theta) - target_ee
+            return err @ err
+        return scipy.optimize.minimize(cost, guess).x
+
+    def _compute_static_pose(self, ee_targets):
+        angles = []
+        guess = [0.0, 0.0, 0.0]
+        for i, ee in enumerate(ee_targets):
+            q = self._ik_single_leg(ee, i, guess)
+            angles.append(q)
+            guess = q.tolist()
+        return np.concatenate(angles)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Gait cache builder
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _interpolate(self, t, waypoints):
+        pts = waypoints
+        n   = pts.shape[0]
+        t   = t % 1.0
+        s   = t * n
+        i   = int(s)
+        u   = s - i
+        p0  = pts[i]
+        p1  = pts[(i + 1) % n]
+        return (1 - u) * p0 + u * p1
+
+    def _build_cache(self, ee_waypoints_per_leg, n_steps=50):
+        cache = []
+        for leg_idx in range(4):
+            leg_cache = []
+            guess = [0.0, 0.0, 0.0]
+            for t in np.linspace(0, 1, n_steps, endpoint=False):
+                ee  = self._interpolate(t, ee_waypoints_per_leg[leg_idx])
+                q   = self._ik_single_leg(ee, leg_idx, guess)
+                leg_cache.append(q)
+                guess = q.tolist()
+            cache.append(leg_cache)
+        return np.concatenate(cache, axis=1)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Gesture callback
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _cancel_walk_timer(self):
-        if self._walk_timer is not None:
+        if hasattr(self, '_walk_timer') and self._walk_timer is not None:
             self._walk_timer.cancel()
             self._walk_timer = None
 
@@ -372,8 +299,8 @@ class GestureControllerNode(Node):
 
         elif cmd == "walk":
             if self.state == RobotState.SITTING:
-                self._transition_to(RobotState.STANDING, "walk from sit → STANDING first")
-                self._walk_timer = self.create_timer(2.0, self._delayed_walk_fwd)
+                self._transition_to(RobotState.STANDING, "walk (from sit) → STANDING first")
+                self._walk_timer = self.create_timer(1.5, self._delayed_walk)
             else:
                 self._transition_to(RobotState.WALKING, "walk → WALKING")
 
@@ -389,59 +316,55 @@ class GestureControllerNode(Node):
             else:
                 self._transition_to(RobotState.SPINNING, "spin → SPINNING")
 
-    def _delayed_walk_fwd(self):
+    def _transition_to(self, new_state: RobotState, log_msg: str):
+        self.get_logger().info(f"State transition: {self.state.name} → {new_state.name}  [{log_msg}]")
+        self.state   = new_state
+        self.counter = 0
+
+    def _delayed_walk(self):
         self._cancel_walk_timer()
         if self.state == RobotState.STANDING:
             self._transition_to(RobotState.WALKING, "delayed walk after stand")
 
-    def _transition_to(self, new_state: RobotState, reason: str):
-        self.get_logger().info(f"State transition: {self.state.name} → {new_state.name}  [{reason}]")
-        self.state   = new_state
-        self.counter = 0
-
-    # ── IK / command selection ────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Timer callbacks
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _ik_callback(self):
         if self.state == RobotState.WALKING:
-            cache = self.trot_fwd_cache
-            self.target_joint_positions = cache[self.counter % len(cache)]
-            self.counter += 1
-
+            cache = self.trot_cache
         elif self.state == RobotState.SPINNING:
             cache = self.spin_cache
-            self.target_joint_positions = cache[self.counter % len(cache)]
-            self.counter += 1
-
         elif self.state == RobotState.SITTING:
             if self.counter < len(self.sit_cache):
-                # Still descending — step through sit trajectory one frame at a time
-                self.target_joint_positions = self.sit_cache[self.counter]
-                self.counter += 1
+                cache = self.sit_cache
             else:
-                # Reached full sit — hold there
                 self.target_joint_positions = self.sit_angles.copy()
-
-        else:  # STANDING
+                return
+        else:
             self.target_joint_positions = self.stand_angles.copy()
+            return
 
-    # ── PD publish ────────────────────────────────────────────────────────────
+        self.target_joint_positions = cache[self.counter % len(cache)]
+        self.counter += 1
 
     def _pd_callback(self):
-        msg      = Float64MultiArray()
+        msg = Float64MultiArray()
         msg.data = self.target_joint_positions.tolist()
         self.cmd_pub.publish(msg)
 
-    # ── Joint state subscriber ────────────────────────────────────────────────
-
     def _joint_callback(self, msg: JointState):
         self.get_logger().info("Joint states received!", once=True)
-        try:
-            self.joint_positions  = np.array(
-                [msg.position[msg.name.index(j)] for j in JOINT_NAMES])
-            self.joint_velocities = np.array(
-                [msg.velocity[msg.name.index(j)] for j in JOINT_NAMES])
-        except ValueError:
-            pass
+        joints = [
+            'leg_front_r_1', 'leg_front_r_2', 'leg_front_r_3',
+            'leg_front_l_1', 'leg_front_l_2', 'leg_front_l_3',
+            'leg_back_r_1',  'leg_back_r_2',  'leg_back_r_3',
+            'leg_back_l_1',  'leg_back_l_2',  'leg_back_l_3',
+        ]
+        self.joint_positions  = np.array(
+            [msg.position[msg.name.index(j)] for j in joints])
+        self.joint_velocities = np.array(
+            [msg.velocity[msg.name.index(j)] for j in joints])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -456,9 +379,15 @@ def main():
     except KeyboardInterrupt:
         print("Shutting down gesture controller …")
     finally:
-        stand_msg      = Float64MultiArray()
-        stand_msg.data = node.stand_angles.tolist()
-        node.cmd_pub.publish(stand_msg)
+        if node.joint_positions is not None:
+            stand_msg = Float64MultiArray()
+            stand_msg.data = node.stand_angles.tolist()
+            node.cmd_pub.publish(stand_msg)
+
+        zero_msg = Float64MultiArray()
+        zero_msg.data = [0.0] * 12
+        node.cmd_pub.publish(zero_msg)
+
         node.destroy_node()
         rclpy.shutdown()
 
